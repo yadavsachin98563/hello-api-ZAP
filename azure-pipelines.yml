@@ -1,0 +1,77 @@
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  imageName: hello-api:latest
+  containerName: hello-api
+  reportDir: $(Build.ArtifactStagingDirectory)/zap-report
+
+steps:
+- checkout: self
+
+- task: Bash@3
+  displayName: 'Build Application Docker Image'
+  inputs:
+    targetType: inline
+    script: |
+      set -e
+      docker build -t $(imageName) .
+
+- task: Bash@3
+  displayName: 'Start Hello API Container'
+  inputs:
+    targetType: inline
+    script: |
+      set -e
+      docker run -d 
+        --name $(containerName) 
+        -p 5000:5000 
+        $(imageName)
+
+      for i in {1..30}; do
+        if curl -fsS http://127.0.0.1:5000/; then
+          echo "Application is responding."
+          exit 0
+        fi
+        sleep 2
+      done
+
+      echo "Application did not become ready."
+      docker logs $(containerName)
+      exit 1
+
+- task: Bash@3
+  displayName: 'Run OWASP ZAP Baseline Scan'
+  inputs:
+    targetType: inline
+    script: |
+      mkdir -p "$(reportDir)"
+
+      docker run --rm \
+        --network host \
+        -v "$(reportDir):/zap/wrk/:rw" \
+        ghcr.io/zaproxy/zaproxy:stable \
+        zap-baseline.py \
+        -t http://127.0.0.1:5000 \
+        -r zap-report.html \
+        -J zap-report.json
+  continueOnError: true
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish OWASP ZAP Reports'
+  condition: always()
+  inputs:
+    targetPath: '$(reportDir)'
+    artifact: 'OWASP-ZAP-Report'
+    publishLocation: pipeline
+
+- task: Bash@3
+  displayName: 'Cleanup Application Container'
+  condition: always()
+  inputs:
+    targetType: inline
+    script: |
+      docker rm -f $(containerName) || true
