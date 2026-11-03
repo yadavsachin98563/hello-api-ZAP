@@ -1,77 +1,191 @@
 trigger:
-- main
+  branches:
+    include:
+      - main
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'
 
 variables:
-  imageName: hello-api:latest
-  containerName: hello-api
-  reportDir: $(Build.ArtifactStagingDirectory)/zap-report
+  IMAGE_NAME: 'hello-api-zap'
+  CONTAINER_NAME: 'hello-api-test'
+  PYTHON_VERSION: '3.11'
 
-steps:
-- checkout: self
+stages:
 
-- task: Bash@3
-  displayName: 'Build Application Docker Image'
-  inputs:
-    targetType: inline
-    script: |
-      set -e
-      docker build -t $(imageName) .
+# ==========================================
+# STAGE 1: BUILD AND TEST
+# ==========================================
 
-- task: Bash@3
-  displayName: 'Start Hello API Container'
-  inputs:
-    targetType: inline
-    script: |
-      set -e
-      docker run -d 
-        --name $(containerName) 
-        -p 5000:5000 
-        $(imageName)
+- stage: Build
+  displayName: 'Build and Validate Application'
 
-      for i in {1..30}; do
-        if curl -fsS http://127.0.0.1:5000/; then
-          echo "Application is responding."
-          exit 0
-        fi
-        sleep 2
-      done
+  jobs:
+  - job: BuildApplication
+    displayName: 'Python and Docker Build'
 
-      echo "Application did not become ready."
-      docker logs $(containerName)
-      exit 1
+    steps:
 
-- task: Bash@3
-  displayName: 'Run OWASP ZAP Baseline Scan'
-  inputs:
-    targetType: inline
-    script: |
-      mkdir -p "$(reportDir)"
+    # 1. Checkout source code
+    - checkout: self
+      displayName: 'Checkout GitHub Repository'
 
-      docker run --rm \
-        --network host \
-        -v "$(reportDir):/zap/wrk/:rw" \
-        ghcr.io/zaproxy/zaproxy:stable \
-        zap-baseline.py \
-        -t http://127.0.0.1:5000 \
-        -r zap-report.html \
-        -J zap-report.json
-  continueOnError: true
+    # 2. Verify project files
+    - task: Bash@3
+      displayName: 'Verify Project Files'
+      inputs:
+        targetType: inline
+        script: |
+          echo "Project Directory:"
+          pwd
 
-- task: PublishPipelineArtifact@1
-  displayName: 'Publish OWASP ZAP Reports'
-  condition: always()
-  inputs:
-    targetPath: '$(reportDir)'
-    artifact: 'OWASP-ZAP-Report'
-    publishLocation: pipeline
+          echo "Project Files:"
+          ls -la
 
-- task: Bash@3
-  displayName: 'Cleanup Application Container'
-  condition: always()
-  inputs:
-    targetType: inline
-    script: |
-      docker rm -f $(containerName) || true
+          test -f app.py
+          test -f requirements.txt
+          test -f Dockerfile
+
+          echo "All required files are available."
+
+    # 3. Setup Python
+    - task: UsePythonVersion@0
+      displayName: 'Setup Python'
+      inputs:
+        versionSpec: '$(PYTHON_VERSION)'
+
+    # 4. Install dependencies
+    - task: Bash@3
+      displayName: 'Install Python Dependencies'
+      inputs:
+        targetType: inline
+        script: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+    # 5. Validate Python application
+    - task: Bash@3
+      displayName: 'Validate Python Application'
+      inputs:
+        targetType: inline
+        script: |
+          python -m py_compile app.py
+
+          echo "Python validation successful."
+
+
+# ==========================================
+# STAGE 2: DOCKER BUILD AND CONTAINER TEST
+# ==========================================
+
+- stage: Docker
+  displayName: 'Docker Build and Test'
+  dependsOn: Build
+  condition: succeeded()
+
+  jobs:
+  - job: DockerBuildAndTest
+    displayName: 'Build and Run Docker Container'
+
+    steps:
+
+    - checkout: self
+      displayName: 'Checkout Source Code'
+
+    # 6. Build Docker Image
+    - task: Bash@3
+      displayName: 'Build Application Docker Image'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+
+          IMAGE="$(IMAGE_NAME):$(Build.BuildId)"
+
+          echo "Building Docker Image: $IMAGE"
+
+          docker build \
+            -f "$(Build.SourcesDirectory)/Dockerfile" \
+            -t "$IMAGE" \
+            "$(Build.SourcesDirectory)"
+
+          echo "Docker Image Created Successfully"
+
+          docker images
+
+    # 7. Verify Docker Image
+    - task: Bash@3
+      displayName: 'Verify Docker Image'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+
+          IMAGE="$(IMAGE_NAME):$(Build.BuildId)"
+
+          echo "Checking Image: $IMAGE"
+
+          docker image inspect "$IMAGE"
+
+          echo "Docker Image Verification Successful"
+
+    # 8. Start Container
+    - task: Bash@3
+      displayName: 'Start Hello API Container'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+
+          IMAGE="$(IMAGE_NAME):$(Build.BuildId)"
+
+          echo "Starting Container"
+          echo "Image: $IMAGE"
+
+          docker run -d \
+            --name "$(CONTAINER_NAME)" \
+            -p 5000:5000 \
+            "$IMAGE"
+
+          echo "Container Started"
+
+          docker ps -a
+
+    # 9. Application Health Check
+    - task: Bash@3
+      displayName: 'Application Health Check'
+      inputs:
+        targetType: inline
+        script: |
+          echo "Checking Application Health"
+
+          for i in {1..12}
+          do
+            if curl -fsS http://127.0.0.1:5000/; then
+              echo ""
+              echo "Application is responding successfully"
+              exit 0
+            fi
+
+            echo "Application not ready. Retrying..."
+            sleep 5
+          done
+
+          echo "Application Health Check Failed"
+
+          docker logs "$(CONTAINER_NAME)"
+
+          exit 1
+
+    # 10. Cleanup
+    - task: Bash@3
+      displayName: 'Docker Cleanup'
+      condition: always()
+      inputs:
+        targetType: inline
+        script: |
+          echo "Cleaning up test container"
+
+          docker rm -f "$(CONTAINER_NAME)" || true
+
+          echo "Cleanup completed"
