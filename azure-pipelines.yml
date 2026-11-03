@@ -1,11 +1,4 @@
 
-# =========================================================
-# HELLO API ZAP - AZURE DEVOPS CI PIPELINE
-# Application: Python Flask
-# Repository: hello-api-ZAP
-# Branch: main
-# =========================================================
-
 trigger:
   branches:
     include:
@@ -17,31 +10,31 @@ pool:
 variables:
   IMAGE_NAME: hello-api-zap
   CONTAINER_NAME: hello-api-test
-  PYTHON_VERSION: '3.11'
-  APP_PORT: '5000'
-  HEALTH_URL: 'http://127.0.0.1:5000/'
+  IMAGE_TAG: $(Build.BuildId)
 
 stages:
 
-# =========================================================
-# STAGE 1 - SOURCE CODE VALIDATION
-# =========================================================
+# ==========================================
+# STAGE 1: APPLICATION VALIDATION
+# ==========================================
 
 - stage: Build
-  displayName: 'Build and Validate Python Application'
+  displayName: 'Application Build and Validation'
 
   jobs:
-  - job: BuildApplication
-    displayName: 'Python Application Validation'
+  - job: PythonBuild
+    displayName: 'Python Application Build'
 
     steps:
 
-    # 1. Checkout source code
     - checkout: self
       clean: true
-      displayName: 'Checkout GitHub Repository'
 
-    # 2. Verify repository and project files
+    - task: UsePythonVersion@0
+      displayName: 'Setup Python'
+      inputs:
+        versionSpec: '3.11'
+
     - task: Bash@3
       displayName: 'Verify Project Files'
       inputs:
@@ -49,76 +42,51 @@ stages:
         script: |
           set -e
 
-          echo "=================================="
-          echo "PROJECT DIRECTORY"
-          echo "=================================="
-
-          pwd
+          echo "Project files:"
           ls -la
-
-          echo "=================================="
-          echo "VERIFY REQUIRED FILES"
-          echo "=================================="
 
           test -f app.py
           test -f requirements.txt
           test -f Dockerfile
 
-          echo "All required files are available."
+          echo "Project files verified."
 
-    # 3. Setup Python
-    - task: UsePythonVersion@0
-      displayName: 'Setup Python Environment'
-      inputs:
-        versionSpec: '$(PYTHON_VERSION)'
-        addToPath: true
-
-    # 4. Install dependencies
     - task: Bash@3
-      displayName: 'Install Python Dependencies'
+      displayName: 'Install Dependencies'
       inputs:
         targetType: inline
         script: |
-          set -e
-
-          python --version
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-          echo "Dependencies installed successfully."
-
-    # 5. Validate Python code
     - task: Bash@3
-      displayName: 'Python Syntax Validation'
+      displayName: 'Validate Python Application'
       inputs:
         targetType: inline
         script: |
-          set -e
-
           python -m py_compile app.py
 
-          echo "Python syntax validation successful."
+          echo "Python validation successful."
 
 
-# =========================================================
-# STAGE 2 - DOCKER BUILD AND APPLICATION TEST
-# =========================================================
+# ==========================================
+# STAGE 2: DOCKER IMAGE BUILD AND TEST
+# ==========================================
 
 - stage: Docker
-  displayName: 'Docker Build and Application Test'
+  displayName: 'Docker Build and Test'
   dependsOn: Build
   condition: succeeded()
 
   jobs:
-  - job: DockerBuildAndTest
-    displayName: 'Docker Build and Container Test'
+  - job: DockerBuild
+    displayName: 'Docker Image Build and Container Test'
 
     steps:
 
     - checkout: self
       clean: true
 
-    # 6. Build Docker Image
     - task: Bash@3
       displayName: 'Build Application Docker Image'
       inputs:
@@ -126,25 +94,17 @@ stages:
         script: |
           set -e
 
-          IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
+          IMAGE="$(IMAGE_NAME):$(IMAGE_TAG)"
 
-          echo "Building Docker Image: ${IMAGE}"
+          echo "Building image: $IMAGE"
 
           docker build \
-            --pull \
-            -f "${BUILD_SOURCESDIRECTORY}/Dockerfile" \
-            -t "${IMAGE}" \
-            "${BUILD_SOURCESDIRECTORY}"
-
-          echo "Docker image build successful."
+            -t "$IMAGE" \
+            -f "$(Build.SourcesDirectory)/Dockerfile" \
+            "$(Build.SourcesDirectory)"
 
           docker images
-      env:
-        IMAGE_NAME: $(IMAGE_NAME)
-        IMAGE_TAG: $(Build.BuildId)
-        BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
 
-    # 7. Verify Docker Image
     - task: Bash@3
       displayName: 'Verify Docker Image'
       inputs:
@@ -152,18 +112,12 @@ stages:
         script: |
           set -e
 
-          IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
+          IMAGE="$(IMAGE_NAME):$(IMAGE_TAG)"
 
-          echo "Verifying image: ${IMAGE}"
+          docker image inspect "$IMAGE"
 
-          docker image inspect "${IMAGE}" >/dev/null
+          echo "Docker image verified."
 
-          echo "Docker image verification successful."
-      env:
-        IMAGE_NAME: $(IMAGE_NAME)
-        IMAGE_TAG: $(Build.BuildId)
-
-    # 8. Start Docker Container
     - task: Bash@3
       displayName: 'Start Hello API Container'
       inputs:
@@ -171,65 +125,46 @@ stages:
         script: |
           set -e
 
-          IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
-
-          echo "Image: ${IMAGE}"
-          echo "Container: ${CONTAINER_NAME}"
+          IMAGE="$(IMAGE_NAME):$(IMAGE_TAG)"
 
           docker run -d \
-            --name "${CONTAINER_NAME}" \
-            -p 127.0.0.1:${APP_PORT}:5000 \
-            "${IMAGE}"
-
-          echo "Container started successfully."
+            --name "$(CONTAINER_NAME)" \
+            -p 127.0.0.1:5000:5000 \
+            "$IMAGE"
 
           docker ps -a
-      env:
-        IMAGE_NAME: $(IMAGE_NAME)
-        IMAGE_TAG: $(Build.BuildId)
-        CONTAINER_NAME: $(CONTAINER_NAME)
-        APP_PORT: $(APP_PORT)
 
-    # 9. Application Health Check
     - task: Bash@3
-      displayName: 'Application Health Check'
+      displayName: 'Test API Endpoints'
       inputs:
         targetType: inline
         script: |
-          echo "Checking application health..."
+          set -e
 
-          for i in {1..12}
+          echo "Testing API endpoints..."
+
+          for i in {1..10}
           do
-            if curl -fsS "${HEALTH_URL}"; then
-              echo ""
-              echo "Application is healthy."
-              exit 0
+            if curl -fsS http://127.0.0.1:5000/; then
+              break
             fi
 
-            echo "Application is not ready. Attempt: ${i}/12"
-            sleep 5
+            sleep 3
           done
 
-          echo "Application health check failed."
+          curl -fsS http://127.0.0.1:5000/
 
-          docker logs "${CONTAINER_NAME}"
+          echo ""
+          curl -fsS http://127.0.0.1:5000/api/hello
 
-          exit 1
-      env:
-        HEALTH_URL: $(HEALTH_URL)
-        CONTAINER_NAME: $(CONTAINER_NAME)
+          echo ""
+          echo "Both API endpoints tested successfully."
 
-    # 10. Docker Container Cleanup
     - task: Bash@3
       displayName: 'Docker Cleanup'
       condition: always()
       inputs:
         targetType: inline
         script: |
-          echo "Cleaning up test container..."
-
-          docker rm -f "${CONTAINER_NAME}" || true
-
-          echo "Docker cleanup completed."
-      env:
-        CONTAINER_NAME: $(CONTAINER_NAME)
+          docker rm -f "$(CONTAINER_NAME)" || true
+          echo "Container cleanup completed."
